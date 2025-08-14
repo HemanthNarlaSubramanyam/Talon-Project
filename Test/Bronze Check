@@ -1,0 +1,76 @@
+USE [case_q1_2025];
+GO
+
+/* 1) Rowcounts */
+SELECT 'customer_sessions_raw' AS table_name, COUNT(*) AS rows FROM bronze.customer_sessions_raw
+UNION ALL
+SELECT 'effects_raw', COUNT(*) FROM bronze.effects_raw;
+GO
+
+/* 2) Peek latest rows (sanity) */
+SELECT TOP (5) * FROM bronze.customer_sessions_raw ORDER BY _load_ts DESC;
+SELECT TOP (5) * FROM bronze.effects_raw          ORDER BY _load_ts DESC;
+GO
+
+/* 3) Schema check (columns & types) */
+SELECT t.name AS table_name, c.column_id, c.name AS column_name,
+       TYPE_NAME(c.user_type_id) AS data_type, c.max_length
+FROM sys.tables t
+JOIN sys.columns c ON c.object_id = t.object_id
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE s.name='bronze' AND t.name IN ('customer_sessions_raw','effects_raw')
+ORDER BY t.name, c.column_id;
+GO
+
+/* 4) Sessions sanity (state mix, date range, totals) */
+SELECT 
+  COUNT(*) AS total_rows,
+  SUM(CASE WHEN LOWER(state)='closed' THEN 1 ELSE 0 END) AS orders_closed,
+  SUM(CASE WHEN LOWER(state)='open'   THEN 1 ELSE 0 END) AS sessions_open,
+  SUM(TRY_CONVERT(decimal(18,2), total_usd)) AS sum_total_usd
+FROM bronze.customer_sessions_raw;
+
+SELECT LOWER(state) AS state, COUNT(*) AS cnt
+FROM bronze.customer_sessions_raw
+GROUP BY LOWER(state)
+ORDER BY cnt DESC;
+
+SELECT 
+  MIN(TRY_CONVERT(datetime2, REPLACE(created,' UTC',''))) AS min_created,
+  MAX(TRY_CONVERT(datetime2, REPLACE(created,' UTC',''))) AS max_created
+FROM bronze.customer_sessions_raw;
+GO
+
+/* 5) Effects sanity (types, numeric value presence) */
+SELECT 
+  COUNT(*) AS total_rows,
+  COUNT(DISTINCT session_fk) AS distinct_sessions_referenced
+FROM bronze.effects_raw;
+
+SELECT TOP (10) effect_type, COUNT(*) AS cnt
+FROM bronze.effects_raw
+GROUP BY effect_type
+ORDER BY cnt DESC;
+
+SELECT 
+  SUM(CASE WHEN effect_type IN ('setDiscountPerItem','setDiscountPerAdditionalCost')
+            AND TRY_CONVERT(decimal(18,2), value) IS NOT NULL THEN 1 ELSE 0 END) AS discount_rows_numeric,
+  SUM(CASE WHEN TRY_CONVERT(decimal(18,2), value) IS NULL THEN 1 ELSE 0 END) AS non_numeric_value_rows
+FROM bronze.effects_raw;
+GO
+
+/* 6) Referential integrity (effects → sessions) */
+SELECT COUNT(*) AS effects_without_matching_session
+FROM bronze.effects_raw e
+LEFT JOIN bronze.customer_sessions_raw s
+  ON s.session_id = e.session_fk
+WHERE s.session_id IS NULL;
+GO
+
+/* 7) Duplicate session IDs (should be 0; if not, Bronze captured duplicates in source) */
+SELECT session_id, COUNT(*) AS dup_count
+FROM bronze.customer_sessions_raw
+GROUP BY session_id
+HAVING COUNT(*) > 1
+ORDER BY dup_count DESC, session_id;
+GO
