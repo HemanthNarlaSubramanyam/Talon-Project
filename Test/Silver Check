@@ -1,0 +1,105 @@
+/*
+===============================================================================
+QA Script: Silver Layer Checks
+===============================================================================
+Script Purpose:
+    Quick validation of the Silver layer after EXEC silver.load_silver:
+      - Row counts & samples
+      - State/Channel distributions & date ranges
+      - Null/negative checks and business rules
+      - Reconciliation vs Bronze (dedupe logic)
+Usage:
+    Run as-is.
+===============================================================================
+*/
+USE [case_q1_2025];
+GO
+
+/* 1) Rowcounts */
+SELECT 'silver.customer_sessions'        AS table_name, COUNT(*) AS rows FROM silver.customer_sessions
+UNION ALL
+SELECT 'silver.effects_summary',               COUNT(*)         FROM silver.effects_summary
+UNION ALL
+SELECT 'silver.sessions_with_discounts',      COUNT(*)         FROM silver.sessions_with_discounts;
+GO
+
+/* 2) Schema quick peek (first 5 rows) */
+SELECT TOP (5) * FROM silver.customer_sessions        ORDER BY created_at DESC;
+SELECT TOP (5) * FROM silver.effects_summary          ORDER BY _src_load_ts DESC;
+SELECT TOP (5) * FROM silver.sessions_with_discounts  ORDER BY created_at DESC;
+GO
+
+/* 3) State & channel distribution */
+SELECT state, channel, COUNT(*) AS cnt
+FROM silver.customer_sessions
+GROUP BY state, channel
+ORDER BY cnt DESC;
+GO
+
+/* 4) Date range and basic totals */
+SELECT 
+  MIN(created_at) AS min_created,
+  MAX(created_at) AS max_created,
+  SUM(CASE WHEN state='closed' THEN 1 ELSE 0 END) AS closed_cnt,
+  SUM(total_usd) AS sum_total_usd
+FROM silver.customer_sessions;
+GO
+
+/* 5) Null & data quality checks (expect small or zero) */
+SELECT
+  SUM(CASE WHEN created_at IS NULL THEN 1 ELSE 0 END) AS null_created_at,
+  SUM(CASE WHEN state      IS NULL THEN 1 ELSE 0 END) AS null_state,
+  SUM(CASE WHEN total_usd  IS NULL THEN 1 ELSE 0 END) AS null_total_usd,
+  SUM(CASE WHEN total_usd  < 0    THEN 1 ELSE 0 END) AS negative_total_usd
+FROM silver.customer_sessions;
+GO
+
+/* 6) Discount sanity (expect no negatives; discount <= total when closed) */
+SELECT TOP (20) *
+FROM silver.sessions_with_discounts
+WHERE discount_amount_usd < 0
+   OR (state='closed' AND discount_amount_usd > total_usd)
+ORDER BY created_at DESC;
+GO
+
+/* 7) Computed columns verification (should return 0 rows) */
+SELECT TOP (20)
+  session_id, state, total_usd, discount_amount_usd, net_revenue,
+  calc = CASE WHEN state='closed' THEN total_usd - ISNULL(discount_amount_usd,0) END
+FROM silver.sessions_with_discounts
+WHERE ABS(
+        (CASE WHEN state='closed' THEN total_usd - ISNULL(discount_amount_usd,0) END)
+        - ISNULL(net_revenue, 0)
+      ) > 0.005;
+GO
+
+/* 8) Reconciliation vs Bronze (dedupe) */
+;WITH ranked AS (
+  SELECT
+    s.session_id,
+    ROW_NUMBER() OVER (PARTITION BY s.session_id ORDER BY s._load_ts DESC) AS rn
+  FROM bronze.customer_sessions_raw s
+)
+SELECT
+  (SELECT COUNT(*) FROM silver.customer_sessions)                                        AS silver_sessions,
+  (SELECT COUNT(*) FROM ranked WHERE rn=1)                                               AS bronze_deduped_sessions,
+  (SELECT COUNT(*) FROM silver.sessions_with_discounts)                                  AS silver_swd,
+  (SELECT COUNT(*) FROM silver.effects_summary)                                          AS silver_effects_sessions;
+GO
+
+/* 9) Orphan checks (effects without matching session in Silver) — expect 0 */
+SELECT COUNT(*) AS effects_without_session
+FROM silver.effects_summary d
+LEFT JOIN silver.customer_sessions s ON s.session_id = d.session_id
+WHERE s.session_id IS NULL;
+GO
+
+/* 10) Index existence (sanity) */
+SELECT i.name, OBJECT_SCHEMA_NAME(i.object_id) AS schem, OBJECT_NAME(i.object_id) AS tbl, i.type_desc
+FROM sys.indexes i
+WHERE i.object_id IN (
+  OBJECT_ID('silver.customer_sessions'),
+  OBJECT_ID('silver.sessions_with_discounts')
+) AND i.index_id > 0
+ORDER BY schem, tbl, i.name;
+GO
