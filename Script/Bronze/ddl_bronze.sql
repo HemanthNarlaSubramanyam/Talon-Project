@@ -1,39 +1,42 @@
-
-Quick Overview:
--------------
+/*
+===============================================================================
+Quick Overview
+===============================================================================
 This script:
-1. Creates the database [case_q1_2025] if it does not exist.
-2. Creates the schema [bronze] in that database (if missing) without switching DB context.
-3. Drops existing raw Bronze tables (customer_sessions_raw, effects_raw) if they exist.
-4. Recreates the raw Bronze tables with NVARCHAR columns to preserve source data fidelity.
-5. Adds a default UTC load timestamp (_load_ts) to track ingestion time.
+1) Creates the database [case_q1_2025] if it does not exist.
+2) Ensures schema [bronze] exists in that database (without issuing USE).
+3) Drops existing raw Bronze tables (customer_sessions_raw, effects_raw) if present.
+4) Recreates the raw Bronze tables with NVARCHAR columns to preserve fidelity.
+5) Adds a default UTC load timestamp (_load_ts) to track ingestion time.
 
 Purpose:
---------
 Sets up the Bronze layer in the medallion architecture to store raw, untransformed data.
+===============================================================================
 */
 
+-- 1) Create DB if needed
 IF DB_ID(N'case_q1_2025') IS NULL
 BEGIN
-  CREATE DATABASE [case_q1_2025];
+  EXEC('CREATE DATABASE [case_q1_2025]');
 END;
 GO
 
-/* Create schema in that DB without using USE (CREATE SCHEMA must be first in its batch) */
-IF NOT EXISTS (SELECT 1 FROM [case_q1_2025].sys.schemas WHERE name = 'bronze')
+-- 2) Create schema [bronze] inside that DB (no USE; CREATE SCHEMA must be first in its batch)
+IF NOT EXISTS (SELECT 1 FROM [case_q1_2025].sys.schemas WHERE name = N'bronze')
 BEGIN
   DECLARE @cmd nvarchar(max) = N'CREATE SCHEMA bronze AUTHORIZATION dbo;';
-  EXEC [case_q1_2025].sys.sp_executesql @cmd;   -- runs in the case_q1_2025 context
+  EXEC [case_q1_2025].sys.sp_executesql @cmd;  -- runs in [case_q1_2025] context
 END;
 GO
 
-/* Drop & recreate Bronze tables */
-IF OBJECT_ID('[case_q1_2025].bronze.customer_sessions_raw','U') IS NOT NULL
+-- 3) Drop existing tables if they exist
+IF OBJECT_ID(N'[case_q1_2025].bronze.customer_sessions_raw','U') IS NOT NULL
   DROP TABLE [case_q1_2025].bronze.customer_sessions_raw;
-IF OBJECT_ID('[case_q1_2025].bronze.effects_raw','U') IS NOT NULL
+IF OBJECT_ID(N'[case_q1_2025].bronze.effects_raw','U') IS NOT NULL
   DROP TABLE [case_q1_2025].bronze.effects_raw;
 GO
 
+-- 4) Recreate Bronze raw tables (all text + metadata)
 CREATE TABLE [case_q1_2025].bronze.customer_sessions_raw
 (
   session_id               NVARCHAR(64)   NULL,
