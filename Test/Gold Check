@@ -1,0 +1,7 @@
+SELECT COUNT(*) FROM gold.fact_orders;
+SELECT COUNT(*) FROM gold.fact_orders WHERE state='closed';
+SELECT
+  SUM(CASE WHEN state='closed' THEN total_usd END)    AS gmv_sql,
+  SUM(discount_amount_usd)                            AS discount_sql,
+  SUM(CASE WHEN state='closed' THEN net_revenue END)  AS net_sql
+FROM gold.fact_orders;
